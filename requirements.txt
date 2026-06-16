@@ -1,0 +1,10 @@
+google-generativeai
+chromadb
+fastapi
+uvicorn
+streamlit
+sentence-transformers
+Pillow
+python-dotenv
+google-genai
+groq
