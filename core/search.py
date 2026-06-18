@@ -80,18 +80,18 @@ def extract_component_from_question(question):
 
 def build_context_from_all():
     """
-    Fetches all drawings from ChromaDB and builds context string.
+    Fetches all drawings from ChromaDB and builds a compact context string.
     Used for global questions about the entire database.
     """
     collection = get_chroma_collection()
-    all_docs = collection.get(include=["documents", "metadatas"])
+    all_docs = collection.get(include=["metadatas"])
+
     context = ""
-    for doc, meta in zip(all_docs["documents"], all_docs["metadatas"]):
-        raw = json.loads(meta.get("raw_json", "{}"))
-        context += f"\nDrawing: {meta['filename']}\n"
-        context += json.dumps(raw, indent=2)
-        context += "\n"
-    return context, len(all_docs["documents"])
+    for meta in all_docs["metadatas"]:
+        # compact summary instead of full JSON
+        context += f"Drawing: {meta['filename']} | Component: {meta['component_type']} | Material: {meta['material']} | Drawing No: {meta['drawing_number']} | Scale: {meta['scale']} | Units: {meta['units']}\n"
+
+    return context, len(all_docs["metadatas"])
 
 def build_context_by_component(component_type):
     """
@@ -186,7 +186,7 @@ def ask_question(question):
                 "content": f"Based on these engineering drawings:\n{context}\n\nQuestion: {question}"
             }
         ],
-        max_tokens=600
+        max_tokens=400
     )
 
     answer = response.choices[0].message.content

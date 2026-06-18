@@ -15,9 +15,7 @@ st.set_page_config(
 st.title("🔧 DrawMind")
 st.caption("Engineering Drawing Intelligence System")
 
-# ─────────────────────────────────────────
 # SIDEBAR
-# ─────────────────────────────────────────
 
 with st.sidebar:
     st.header("Database Stats")
@@ -56,9 +54,7 @@ with st.sidebar:
 
             st.rerun()
 
-# ─────────────────────────────────────────
 # MAIN AREA
-# ─────────────────────────────────────────
 
 st.subheader("Ask a Question")
 st.write("Ask anything about the engineering drawings in natural language.")
