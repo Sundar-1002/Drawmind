@@ -179,7 +179,8 @@ def ask_question(question):
                 There are exactly {count} drawings in the context.
                 Do NOT invent, duplicate, or assume any information not present.
                 If asked for more samples than available, clearly state how many are available.
-                Be specific and mention drawing filenames when relevant."""
+                Be specific and mention drawing filenames when relevant.
+                IMPORTANT: Never include raw JSON or code in your answer. Always answer in clean natural language."""
             },
             {
                 "role": "user",

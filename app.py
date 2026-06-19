@@ -46,11 +46,11 @@ with st.sidebar:
                     success, result = ingest_single(save_path, uploaded_file.name)
 
                 if success:
-                    st.success(f"✅ {uploaded_file.name}")
+                    st.success(f"{uploaded_file.name}")
                     st.write(f"Component: {result.get('component_type', 'unknown').title()}")
                     st.write(f"Material: {result.get('material', 'Not specified')}")
                 else:
-                    st.error(f"❌ Failed: {result}")
+                    st.error(f"Failed: {result}")
 
             st.rerun()
 
