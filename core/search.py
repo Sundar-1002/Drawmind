@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import chromadb
 from dotenv import load_dotenv
@@ -17,7 +18,11 @@ def get_chroma_collection():
 
 def get_database_stats():
     """
-    Returns total drawing count and component type breakdown.
+    Returns total drawing count and component type breakdown from ChromaDB.
+
+    Returns:
+        tuple: (total, component_types) where total is int and
+               component_types is dict mapping type names to counts.
     """
     collection = get_chroma_collection()
     total = collection.count()
@@ -45,7 +50,7 @@ def is_global_question(question):
 def extract_component_from_question(question):
     """
     Uses LLM to extract which component type the question is about.
-    Returns component type string or None if question is not component specific.
+    Returns component type string or None if not component specific.
     """
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -70,25 +75,31 @@ def extract_component_from_question(question):
         max_tokens=5
     )
 
-    # take only the first word to handle any extra output
     result = response.choices[0].message.content.strip().lower().split()[0]
-    
-    # clean punctuation
     result = result.strip(".,!?")
-    
     return None if result == "none" else result
+
+def extract_filename_from_question(question):
+    """
+    Checks if the question references a specific drawing filename.
+    Returns filename string or None.
+    Example: "give me image of 8.jpg" -> "8.jpg"
+    """
+    match = re.search(r'\b\d+[\w]*\.\w+\b', question)
+    if match:
+        return match.group(0)
+    return None
 
 def build_context_from_all():
     """
-    Fetches all drawings from ChromaDB and builds a compact context string.
-    Used for global questions about the entire database.
+    Fetches all drawings as compact summary for global questions.
+    Avoids token limit issues with 30 plus drawings.
     """
     collection = get_chroma_collection()
     all_docs = collection.get(include=["metadatas"])
 
     context = ""
     for meta in all_docs["metadatas"]:
-        # compact summary instead of full JSON
         context += f"Drawing: {meta['filename']} | Component: {meta['component_type']} | Material: {meta['material']} | Drawing No: {meta['drawing_number']} | Scale: {meta['scale']} | Units: {meta['units']}\n"
 
     return context, len(all_docs["metadatas"])
@@ -96,7 +107,7 @@ def build_context_from_all():
 def build_context_by_component(component_type):
     """
     Directly filters ChromaDB by component type metadata.
-    Much more accurate than semantic search for component specific questions.
+    More accurate than semantic search for component specific questions.
     """
     collection = get_chroma_collection()
     all_docs = collection.get(include=["documents", "metadatas"])
@@ -118,10 +129,29 @@ def build_context_by_component(component_type):
 
     return context, len(filtered_docs), filtered_metas
 
+def build_context_by_filename(filename):
+    """
+    Directly fetches a specific drawing by filename from ChromaDB.
+    """
+    collection = get_chroma_collection()
+    result = collection.get(
+        ids=[filename],
+        include=["documents", "metadatas"]
+    )
+
+    if not result["ids"]:
+        return "", 0, []
+
+    meta = result["metadatas"][0]
+    raw = json.loads(meta.get("raw_json", "{}"))
+    context = f"\nDrawing: {meta['filename']}\n"
+    context += json.dumps(raw, indent=2)
+
+    return context, 1, [meta]
+
 def build_context_from_search(question):
     """
-    Searches for relevant drawings and builds context string.
-    Used for non component specific questions.
+    Semantic search for non component specific questions.
     """
     collection = get_chroma_collection()
     query_embedding = embedder.encode(question).tolist()
@@ -143,31 +173,41 @@ def build_context_from_search(question):
 def ask_question(question):
     """
     Answers a natural language question about the drawings.
-    Automatically detects global vs specific questions.
-    For component specific questions, directly filters by metadata.
-    For other questions, uses semantic search.
+    Routes question to correct retrieval strategy.
+    LLM decides whether to include image references via IMAGES: line.
     Returns answer string and referenced metadata list.
     """
-    # initialize to empty by default
+    # initialize all variables at top
     referenced_metadatas = []
+    all_metadatas = []
     context = ""
     count = 0
 
     if is_global_question(question):
         context, count = build_context_from_all()
-        referenced_metadatas = []
+        all_metadatas = []
+
     else:
-        matched_component = extract_component_from_question(question)
-        print(f"Matched component: {matched_component}")
+        # check for specific filename first
+        specific_file = extract_filename_from_question(question)
 
-        if matched_component and matched_component != "none":
-            context, count, referenced_metadatas = build_context_by_component(matched_component)
-
+        if specific_file:
+            context, count, all_metadatas = build_context_by_filename(specific_file)
             if count == 0:
-                context = "No drawings found for this component type."
-                referenced_metadatas = []
+                context = f"No drawing found with filename {specific_file}."
+                all_metadatas = []
+
         else:
-            context, count, referenced_metadatas = build_context_from_search(question)
+            # check for component type
+            matched_component = extract_component_from_question(question)
+
+            if matched_component and matched_component != "none":
+                context, count, all_metadatas = build_context_by_component(matched_component)
+                if count == 0:
+                    context = "No drawings found for this component type."
+                    all_metadatas = []
+            else:
+                context, count, all_metadatas = build_context_from_search(question)
 
     response = groq_client.chat.completions.create(
         model="llama-3.1-8b-instant",
@@ -179,16 +219,55 @@ def ask_question(question):
                 There are exactly {count} drawings in the context.
                 Do NOT invent, duplicate, or assume any information not present.
                 If asked for more samples than available, clearly state how many are available.
-                Be specific and mention drawing filenames when relevant.
-                IMPORTANT: Never include raw JSON or code in your answer. Always answer in clean natural language."""
+                Never include raw JSON or code in your answer. Always answer in clean natural language.
+
+                IMAGES RULE:
+                At the end of your answer add a line starting with IMAGES: in these cases:
+                1. The question uses words like: show, display, give, find, retrieve, see, view, image, images, drawing, drawings, what does, look like
+                2. The question asks to find or retrieve specific drawings by filename
+                3. The question asks to list or show components of a specific type
+
+                For analytical questions like "which has largest dimension", "compare", "how many",
+                do NOT add an IMAGES line. Just answer in text.
+
+                When you do add IMAGES, list ONLY the filenames that directly answer the question.
+
+                Example for "show me all images":
+                IMAGES: 1..png, 2.png, 3.jpg, 4.webp, 5.png ...all filenames
+
+                Example for "show me all gear drawings":
+                IMAGES: 1..png, 2.png, 3.jpg, 4.webp, 5.png, 6.png, 7.png, 8.jpg
+
+                Example for "give me gears greater than 80mm":
+                The gear with dimensions greater than 80mm is Drawing 6.png with outside diameter 167.4mm.
+                IMAGES: 6.png
+
+                Example for "which drawing has the largest dimension":
+                Drawing 12.png has the largest dimension of 232mm.
+                (no IMAGES line)"""
             },
             {
                 "role": "user",
                 "content": f"Based on these engineering drawings:\n{context}\n\nQuestion: {question}"
             }
         ],
-        max_tokens=400
+        max_tokens=500
     )
 
-    answer = response.choices[0].message.content
-    return answer, referenced_metadatas 
+    raw_answer = response.choices[0].message.content
+
+    # parse IMAGES line if LLM included one
+    if "IMAGES:" in raw_answer:
+        parts = raw_answer.split("IMAGES:")
+        answer = parts[0].strip()
+        images_line = parts[1].strip()
+        image_filenames = [f.strip() for f in images_line.split(",") if f.strip()]
+        referenced_metadatas = [
+            m for m in all_metadatas
+            if m.get("filename") in image_filenames
+        ]
+    else:
+        answer = raw_answer
+        referenced_metadatas = []
+
+    return answer, referenced_metadatas
