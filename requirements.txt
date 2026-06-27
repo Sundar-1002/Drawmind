@@ -8,3 +8,5 @@ Pillow
 python-dotenv
 google-genai
 groq
+pinecone
+python-multipart
