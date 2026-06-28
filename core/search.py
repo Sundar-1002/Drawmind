@@ -1,10 +1,10 @@
 import os
 import re
 import json
-import chromadb
 from dotenv import load_dotenv
 from groq import Groq
 from sentence_transformers import SentenceTransformer
+from pinecone import Pinecone
 
 load_dotenv()
 
@@ -12,25 +12,32 @@ load_dotenv()
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
 
-def get_chroma_collection():
-    client = chromadb.PersistentClient(path="./chroma_db")
-    return client.get_or_create_collection(name="drawings")
+# Pinecone setup
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index(os.getenv("PINECONE_INDEX", "drawmind"))
 
 def get_database_stats():
     """
-    Returns total drawing count and component type breakdown from ChromaDB.
+    Returns total drawing count and component type breakdown from Pinecone.
 
     Returns:
         tuple: (total, component_types) where total is int and
                component_types is dict mapping type names to counts.
     """
-    collection = get_chroma_collection()
-    total = collection.count()
-    all_data = collection.get()
+    stats = index.describe_index_stats()
+    total = stats.total_vector_count
+
+    # fetch all vectors to build component type breakdown
+    # Pinecone does not have a direct group by so we fetch all metadata
+    results = index.query(
+        vector=[0.0] * 384,
+        top_k=total if total > 0 else 1,
+        include_metadata=True
+    )
 
     component_types = {}
-    for meta in all_data["metadatas"]:
-        ct = meta.get("component_type", "unknown").lower()
+    for match in results.matches:
+        ct = match.metadata.get("component_type", "unknown").lower()
         component_types[ct] = component_types.get(ct, 0) + 1
 
     return total, component_types
@@ -81,7 +88,7 @@ def extract_component_from_question(question):
 
 def extract_filename_from_question(question):
     """
-    Checks if the question references a specific drawing filename.
+    Checks if question references a specific drawing filename.
     Returns filename string or None.
     Example: "give me image of 8.jpg" -> "8.jpg"
     """
@@ -90,59 +97,76 @@ def extract_filename_from_question(question):
         return match.group(0)
     return None
 
+def fetch_all_metadata():
+    """
+    Fetches all drawing metadata from Pinecone.
+    Used for global questions and component filtering.
+
+    Returns:
+        list: List of metadata dicts for all drawings.
+    """
+    stats = index.describe_index_stats()
+    total = stats.total_vector_count
+
+    if total == 0:
+        return []
+
+    results = index.query(
+        vector=[0.0] * 384,
+        top_k=total,
+        include_metadata=True
+    )
+
+    return [match.metadata for match in results.matches]
+
 def build_context_from_all():
     """
     Fetches all drawings as compact summary for global questions.
-    Avoids token limit issues with 30 plus drawings.
+    Avoids token limit issues with large databases.
     """
-    collection = get_chroma_collection()
-    all_docs = collection.get(include=["metadatas"])
+    all_metadata = fetch_all_metadata()
 
     context = ""
-    for meta in all_docs["metadatas"]:
+    for meta in all_metadata:
         context += f"Drawing: {meta['filename']} | Component: {meta['component_type']} | Material: {meta['material']} | Drawing No: {meta['drawing_number']} | Scale: {meta['scale']} | Units: {meta['units']}\n"
 
-    return context, len(all_docs["metadatas"])
+    return context, len(all_metadata)
 
 def build_context_by_component(component_type):
     """
-    Directly filters ChromaDB by component type metadata.
+    Filters Pinecone metadata by component type.
     More accurate than semantic search for component specific questions.
     """
-    collection = get_chroma_collection()
-    all_docs = collection.get(include=["documents", "metadatas"])
+    all_metadata = fetch_all_metadata()
 
-    filtered_docs = []
-    filtered_metas = []
-
-    for doc, meta in zip(all_docs["documents"], all_docs["metadatas"]):
-        if component_type in meta.get("component_type", "").lower():
-            filtered_docs.append(doc)
-            filtered_metas.append(meta)
+    filtered = [
+        meta for meta in all_metadata
+        if component_type in meta.get("component_type", "").lower()
+    ]
 
     context = ""
-    for doc, meta in zip(filtered_docs, filtered_metas):
+    for meta in filtered:
         raw = json.loads(meta.get("raw_json", "{}"))
         context += f"\nDrawing: {meta['filename']}\n"
         context += json.dumps(raw, indent=2)
         context += "\n"
 
-    return context, len(filtered_docs), filtered_metas
+    return context, len(filtered), filtered
 
 def build_context_by_filename(filename):
     """
-    Directly fetches a specific drawing by filename from ChromaDB.
+    Directly fetches a specific drawing by filename from Pinecone.
     """
-    collection = get_chroma_collection()
-    result = collection.get(
-        ids=[filename],
-        include=["documents", "metadatas"]
-    )
+    result = index.fetch(ids=[filename])
 
-    if not result["ids"]:
+    if not result.vectors:
         return "", 0, []
 
-    meta = result["metadatas"][0]
+    vector_data = result.vectors.get(filename)
+    if not vector_data:
+        return "", 0, []
+
+    meta = vector_data.metadata
     raw = json.loads(meta.get("raw_json", "{}"))
     context = f"\nDrawing: {meta['filename']}\n"
     context += json.dumps(raw, indent=2)
@@ -151,33 +175,37 @@ def build_context_by_filename(filename):
 
 def build_context_from_search(question):
     """
-    Semantic search for non component specific questions.
+    Semantic search using Pinecone vector similarity.
+    Used for non component specific questions.
     """
-    collection = get_chroma_collection()
     query_embedding = embedder.encode(question).tolist()
-    results = collection.query(
-        query_embeddings=[query_embedding],
-        n_results=5
+
+    results = index.query(
+        vector=query_embedding,
+        top_k=5,
+        include_metadata=True
     )
+
     context = ""
-    for doc, meta in zip(
-        results["documents"][0],
-        results["metadatas"][0]
-    ):
+    all_metadata = []
+
+    for match in results.matches:
+        meta = match.metadata
         raw = json.loads(meta.get("raw_json", "{}"))
         context += f"\nDrawing: {meta['filename']}\n"
         context += json.dumps(raw, indent=2)
         context += "\n"
-    return context, len(results["documents"][0]), results["metadatas"][0]
+        all_metadata.append(meta)
+
+    return context, len(all_metadata), all_metadata
 
 def ask_question(question):
     """
     Answers a natural language question about the drawings.
     Routes question to correct retrieval strategy.
-    LLM decides whether to include image references via IMAGES: line.
+    LLM decides whether to include image references via IMAGES line.
     Returns answer string and referenced metadata list.
     """
-    # initialize all variables at top
     referenced_metadatas = []
     all_metadatas = []
     context = ""
@@ -188,7 +216,6 @@ def ask_question(question):
         all_metadatas = []
 
     else:
-        # check for specific filename first
         specific_file = extract_filename_from_question(question)
 
         if specific_file:
@@ -198,7 +225,6 @@ def ask_question(question):
                 all_metadatas = []
 
         else:
-            # check for component type
             matched_component = extract_component_from_question(question)
 
             if matched_component and matched_component != "none":
@@ -227,24 +253,20 @@ def ask_question(question):
                 2. The question asks to find or retrieve specific drawings by filename
                 3. The question asks to list or show components of a specific type
 
-                For analytical questions like "which has largest dimension", "compare", "how many",
+                For analytical questions like which has largest dimension, compare, how many,
                 do NOT add an IMAGES line. Just answer in text.
 
                 When you do add IMAGES, list ONLY the filenames that directly answer the question.
-
-                Example for "show me all images":
-                IMAGES: 1..png, 2.png, 3.jpg, 4.webp, 5.png ...all filenames
 
                 Example for "show me all gear drawings":
                 IMAGES: 1..png, 2.png, 3.jpg, 4.webp, 5.png, 6.png, 7.png, 8.jpg
 
                 Example for "give me gears greater than 80mm":
-                The gear with dimensions greater than 80mm is Drawing 6.png with outside diameter 167.4mm.
+                The gear with dimensions greater than 80mm is Drawing 6.png.
                 IMAGES: 6.png
 
                 Example for "which drawing has the largest dimension":
-                Drawing 12.png has the largest dimension of 232mm.
-                (no IMAGES line)"""
+                Drawing 12.png has the largest dimension of 232mm."""
             },
             {
                 "role": "user",
@@ -256,7 +278,6 @@ def ask_question(question):
 
     raw_answer = response.choices[0].message.content
 
-    # parse IMAGES line if LLM included one
     if "IMAGES:" in raw_answer:
         parts = raw_answer.split("IMAGES:")
         answer = parts[0].strip()

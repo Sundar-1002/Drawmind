@@ -1,5 +1,4 @@
 google-generativeai
-chromadb
 fastapi
 uvicorn
 streamlit

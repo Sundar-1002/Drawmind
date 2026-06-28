@@ -1,16 +1,40 @@
 import os
 import json
 import base64
-import chromadb
 from dotenv import load_dotenv
 from groq import Groq
 from sentence_transformers import SentenceTransformer
+from pinecone import Pinecone
+import cloudinary
+import cloudinary.uploader
 
 load_dotenv()
+
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET")
+)
+
+
+def upload_to_cloudinary(image_path, filename):
+    """
+    Uploads image to Cloudinary and returns public URL.
+    """
+    result = cloudinary.uploader.upload(
+        image_path,
+        public_id=f"drawmind/{filename}",
+        overwrite=True
+    )
+    return result["secure_url"]
 
 # Setup
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Pinecone setup
+pc = Pinecone(api_key=os.getenv("PINECONE_API_KEY"))
+index = pc.Index(os.getenv("PINECONE_INDEX", "drawmind"))
 
 DRAWINGS_FOLDER = "./drawings"
 
@@ -44,15 +68,29 @@ Extract the following and return ONLY a valid JSON object with no explanation an
 }
 """
 
-def get_chroma_collection():
-    client = chromadb.PersistentClient(path="./chroma_db")
-    return client.get_or_create_collection(name="drawings")
-
 def encode_image(image_path):
+    """
+    Encodes image file to base64 string for Groq Vision API.
+
+    Args:
+        image_path (str): Full path to image file.
+
+    Returns:
+        str: Base64 encoded string.
+    """
     with open(image_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
 def get_media_type(filename):
+    """
+    Returns MIME type for a given image filename.
+
+    Args:
+        filename (str): Image filename with extension.
+
+    Returns:
+        str: MIME type string.
+    """
     ext = filename.lower().split(".")[-1]
     mapping = {
         "jpg": "image/jpeg",
@@ -66,6 +104,14 @@ def extract_drawing_data(image_path, filename):
     """
     Sends image to Groq Vision and extracts structured metadata.
     Returns parsed JSON dictionary.
+
+    Args:
+        image_path (str): Full path to drawing image.
+        filename (str): Image filename for media type detection.
+
+    Returns:
+        dict: Extracted fields including component_type, material,
+              dimensions, tolerances, surface_finish, notes, units.
     """
     base64_image = encode_image(image_path)
     media_type = get_media_type(filename)
@@ -100,7 +146,13 @@ def extract_drawing_data(image_path, filename):
 
 def build_text_representation(data):
     """
-    Converts extracted JSON into a single text string for embedding.
+    Converts extracted JSON into a flat text string for embedding.
+
+    Args:
+        data (dict): Extracted drawing data from extract_drawing_data().
+
+    Returns:
+        str: Formatted multi-line text combining all key fields.
     """
     return f"""
     Component: {data.get('component_type', 'unknown')}
@@ -114,53 +166,66 @@ def build_text_representation(data):
     Notes: {', '.join(data.get('notes', []))}
     """
 
-def store_drawing(collection, image_path, filename, data):
+def store_drawing(image_path, filename, data):
     """
-    Stores extracted drawing data and its embedding in ChromaDB.
-    Deletes existing entry first if it already exists.
+    Stores extracted drawing data and embedding in Pinecone.
+    Uses filename as unique vector ID so re-ingesting updates existing entry.
+
+    Args:
+        image_path (str): Full path to drawing image.
+        filename (str): Unique identifier for this drawing in Pinecone.
+        data (dict): Extracted drawing data from extract_drawing_data().
     """
     text = build_text_representation(data)
     embedding = embedder.encode(text).tolist()
 
-    existing = collection.get(ids=[filename])
-    if existing["ids"]:
-        collection.delete(ids=[filename])
+    # pinecone metadata must be flat key value pairs
+    # store raw_json as string for later retrieval
 
-    collection.add(
-        ids=[filename],
-        embeddings=[embedding],
-        documents=[text],
-        metadatas=[{
-            "filename": filename,
-            "image_path": image_path,
-            "component_type": data.get("component_type", "unknown"),
-            "material": data.get("material", "unknown"),
-            "drawing_number": data.get("drawing_number", "unknown"),
-            "scale": data.get("scale", "unknown"),
-            "units": data.get("units", "unknown"),
-            "raw_json": json.dumps(data)
+    image_url = upload_to_cloudinary(image_path, filename) 
+
+    index.upsert(
+        vectors=[{
+            "id": filename,
+            "values": embedding,
+            "metadata": {
+                "filename": filename,
+                "image_url": image_url,
+                "component_type": data.get("component_type", "unknown"),
+                "material": data.get("material", "unknown"),
+                "drawing_number": data.get("drawing_number", "unknown"),
+                "scale": data.get("scale", "unknown"),
+                "units": data.get("units", "unknown"),
+                "raw_json": json.dumps(data)
+            }
         }]
     )
 
 def ingest_single(image_path, filename):
     """
-    Full pipeline for one drawing.
-    Returns (success, data or error message).
+    Full ingestion pipeline for one drawing.
+    Extracts metadata with Vision AI and stores in Pinecone.
+
+    Args:
+        image_path (str): Full path to drawing image.
+        filename (str): Image filename.
+
+    Returns:
+        tuple: (success, data or error message)
     """
     try:
-        collection = get_chroma_collection()
         data = extract_drawing_data(image_path, filename)
-        store_drawing(collection, image_path, filename, data)
+        store_drawing(image_path, filename, data)
         return True, data
     except Exception as e:
         return False, str(e)
 
 def ingest_all():
     """
-    Ingests all drawings in the drawings folder.
-    Used for bulk ingestion from command line.
+    Bulk ingestion of all drawings in DRAWINGS_FOLDER.
+    Processes every image and stores in Pinecone.
+    Used for initial database population from command line.
     """
-    collection = get_chroma_collection()
     files = os.listdir(DRAWINGS_FOLDER)
     image_files = [
         f for f in files

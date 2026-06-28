@@ -1,9 +1,13 @@
 import os
 import json
 import streamlit as st
-from PIL import Image
-from core.ingest import ingest_single, DRAWINGS_FOLDER
-from core.search import ask_question, get_database_stats
+from dotenv import load_dotenv
+import requests
+
+load_dotenv()
+
+# FastAPI base URL 
+API_URL = os.getenv("API_URL", "http://localhost:8000")
 
 # Page config
 st.set_page_config(
@@ -19,9 +23,18 @@ st.caption("Engineering Drawing Intelligence System")
 
 with st.sidebar:
     st.header("Database Stats")
-    total, component_types = get_database_stats()
-    st.metric("Total Drawings", total)
-
+    try:
+        response = requests.get(f"{API_URL}/stats")
+        if response.status_code == 200:
+            data = response.json()
+            total = data.get("total", 0)
+            st.metric("Total Drawings", total)
+        else:
+            st.error("Could not load stats")
+            total = 0
+    except Exception as e:
+        st.error(f"Error fetching stats: {e}")
+        total = 0
     st.divider()
 
     st.subheader("Add New Drawings")
@@ -37,21 +50,23 @@ with st.sidebar:
     if uploaded_files:
         if st.button("Ingest Uploaded Drawings", type="primary", use_container_width=True):
             for uploaded_file in uploaded_files:
-                save_path = os.path.join(DRAWINGS_FOLDER, uploaded_file.name)
-
-                with open(save_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-
                 with st.spinner(f"Processing {uploaded_file.name}..."):
-                    success, result = ingest_single(save_path, uploaded_file.name)
-
-                if success:
-                    st.success(f"{uploaded_file.name}")
-                    st.write(f"Component: {result.get('component_type', 'unknown').title()}")
-                    st.write(f"Material: {result.get('material', 'Not specified')}")
-                else:
-                    st.error(f"Failed: {result}")
-
+                    try:
+                        response = requests.post(
+                            f"{API_URL}/ingest",
+                            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)},
+                            timeout=60
+                        )
+                        if response.status_code == 200:
+                            result = response.json()
+                            st.success(f"Successfully ingested {uploaded_file.name}")
+                            st.write(f"Component Type: {result.get('component_type', 'unknown').title()}")
+                            material = result.get('material', 'unknown')
+                            st.write(f"Material: {material if material != 'unknown' else 'Not specified'}")
+                        else:
+                            st.error(f"Failed to ingest {uploaded_file.name}: {response.text}")
+                    except Exception as e:
+                        st.error(f"Error ingesting {uploaded_file.name}: {e}")
             st.rerun()
 
 # MAIN AREA
@@ -72,27 +87,42 @@ with col1:
 
 if ask_button and question:
     with st.spinner("Analysing drawings and generating answer..."):
-        answer, referenced_metadatas = ask_question(question)
+        try:
+            response = requests.post(
+                f"{API_URL}/ask",
+                json={"question": question},
+                timeout=30
+            )
 
-    st.markdown("### Answer")
-    st.write(answer)
+            if response.status_code == 200:
+                data = response.json()
+                answer = data["answer"]
+                referenced_drawings = data["referenced_drawings"]
 
-    if referenced_metadatas:
-        st.markdown("### Referenced Drawings")
-        cols = st.columns(len(referenced_metadatas))
-        for idx, meta in enumerate(referenced_metadatas):
-            with cols[idx]:
-                image_path = meta.get("image_path")
-                if image_path and os.path.exists(image_path):
-                    img = Image.open(image_path)
-                    st.image(img, use_container_width=True)
-                raw = json.loads(meta.get("raw_json", "{}"))
-                st.caption(f"**{meta['filename']}**")
-                st.caption(f"Component: {meta['component_type'].title()}")
-                material = meta.get('material', 'unknown')
-                st.caption(f"Material: {material if material != 'unknown' else 'Not specified'}")
-                if raw.get("dimensions"):
-                    st.caption(f"Key dimension: {raw['dimensions'][0]}")
+                st.markdown("### Answer")
+                st.write(answer)
+
+                if referenced_drawings:
+                    st.markdown("### Referenced Drawings")
+                    cols = st.columns(len(referenced_drawings))
+                    for idx, drawing in enumerate(referenced_drawings):
+                        with cols[idx]:
+                            image_url = drawing.get("image_url")
+                            if image_url:
+                                st.image(image_url, use_container_width=True)
+                            st.caption(f"**{drawing['filename']}**")
+                            st.caption(f"Component: {drawing['component_type'].title()}")
+                            material = drawing.get('material', 'unknown')
+                            st.caption(f"Material: {material if material != 'unknown' else 'Not specified'}")
+                            if drawing.get("dimensions"):
+                                st.caption(f"Key dimension: {drawing['dimensions'][0]}")
+            else:
+                st.error(f"Error: {response.json().get('detail', 'Unknown error')}")
+
+        except requests.exceptions.ConnectionError:
+            st.error("Cannot connect to API. Make sure FastAPI is running on http://localhost:8000")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
 elif ask_button and not question:
     st.warning("Please enter a question first.")

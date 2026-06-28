@@ -4,7 +4,8 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from core.ingest import ingest_single, DRAWINGS_FOLDER
-from core.search import ask_question, get_database_stats, get_chroma_collection
+from core.search import ask_question, get_database_stats
+
 
 # FastAPI application instance
 app = FastAPI(
@@ -55,7 +56,7 @@ def stats():
 async def ingest(file: UploadFile = File(...)):
     """
     Uploads and ingests a single engineering drawing.
-    Runs Groq Vision AI extraction, embeds result, stores in ChromaDB.
+    Runs Groq Vision AI extraction, embeds result, stores in Pinecone.
 
     Args:
         file: Image file (PNG, JPG, WEBP)
