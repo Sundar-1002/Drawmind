@@ -1,15 +1,26 @@
 # DrawMind
 ### Engineering Drawing Intelligence System
 
-DrawMind is a multimodal RAG system that transforms unstructured engineering drawing images into an intelligent, searchable knowledge base. Instead of storing drawings as inaccessible image files, DrawMind uses Vision AI to automatically extract metadata and makes every drawing queryable through natural language.
+DrawMind is a multimodal RAG system that transforms unstructured engineering drawing images into an intelligent, searchable knowledge base. Vision AI automatically extracts metadata from each drawing and makes the entire collection queryable through natural language.
 
 ---
 
 ## The Problem
 
-Companies store millions of engineering drawings as image files. These drawings contain critical information: component types, materials, dimensions, tolerances, and specifications. But without a way to search them, this data is essentially dark and inaccessible. A procurement manager cannot simply ask "show me all stainless steel components above 100mm diameter" across thousands of drawings.
+Companies store millions of engineering drawings as image files. These drawings contain critical information including component types, materials, dimensions, tolerances, and manufacturing specifications. But because they are images, none of that information is searchable or queryable without opening each file manually.
 
 DrawMind solves this.
+
+---
+
+## Live Demo
+
+The system is fully deployed and accessible:
+
+- **Frontend:** Streamlit Cloud
+- **Backend API:** Railway
+- **Vectors:** Pinecone (cloud, persistent)
+- **Images:** Cloudinary (cloud, persistent)
 
 ---
 
@@ -24,40 +35,57 @@ tolerances, surface finish, drawing number, scale
         ↓
 HuggingFace SentenceTransformer embeds extracted text
         ↓
-ChromaDB stores vectors and metadata
+Pinecone stores vectors and metadata permanently
+Image stored in Cloudinary with public URL
         ↓
 User asks a natural language question
         ↓
 System routes question to correct retrieval strategy
         ↓
-Groq LLM generates a grounded answer
+Groq LLM generates grounded answer
         ↓
-Referenced drawings shown alongside the answer
+Referenced drawings shown with images
 ```
+
+---
+
+## Smart Question Routing
+
+DrawMind does not use one size fits all semantic search. It routes each question to the most accurate retrieval strategy:
+
+| Question Type | Example | Strategy |
+|---|---|---|
+| Global overview | "What components are available?" | Compact summary of entire database |
+| Filename specific | "Give me image of 8.jpg" | Direct fetch by ID from Pinecone |
+| Component type | "Show me all gear drawings" | Metadata filter, no semantic search |
+| Semantic | "Find shafts longer than 500mm" | Vector similarity search |
 
 ---
 
 ## Features
 
-- **Automatic metadata extraction** from engineering drawing images using Groq Vision AI (Llama 4 Scout)
-- **Natural language Q&A** across all drawings using Groq LLM (Llama 3.1)
-- **Smart question routing**: component specific questions use direct metadata filtering; general questions use semantic search; database overview questions fetch all drawings
-- **Real time ingestion**: upload new drawings directly from the UI and they become instantly searchable
-- **Honest edge case handling**: system accurately reports when fewer drawings exist than requested, never hallucinating results
-- **Component type detection**: automatically classifies gears, shafts, brackets, housings, fasteners, flanges, and more
+- Automatic metadata extraction from engineering drawing images using Groq Vision AI
+- Natural language Q&A across all drawings
+- Smart four level question routing for accurate results
+- Real time ingestion: upload new drawings from the UI, instantly searchable
+- Honest edge case handling: never hallucinates results when fewer drawings exist than requested
+- LLM controlled image display: shows referenced drawings only when relevant
+- Conversational memory within a session for follow up questions
+- Fully hosted with persistent cloud storage
 
 ---
 
 ## Tech Stack
 
-| Component | Technology |
-|---|---|
-| Vision AI for extraction | Groq (Llama 4 Scout 17B) |
-| LLM for Q&A | Groq (Llama 3.1 8B Instant) |
-| Vector database | ChromaDB (persistent) |
-| Text embeddings | HuggingFace sentence-transformers (all-MiniLM-L6-v2) |
-| Backend functions | Python |
-| Frontend | Streamlit |
+| Component | Technology | Purpose |
+|---|---|---|
+| Vision AI | Groq Llama 4 Scout 17B | Reads and extracts data from drawing images |
+| LLM | Groq Llama 3.1 8B | Answers questions from retrieved context |
+| Vector Database | Pinecone | Persistent cloud vector storage |
+| Image Storage | Cloudinary | Persistent public image URLs |
+| Embeddings | HuggingFace all-MiniLM-L6-v2 | Converts text to semantic vectors |
+| Backend API | FastAPI | REST API layer |
+| Frontend | Streamlit | User interface |
 
 ---
 
@@ -65,16 +93,27 @@ Referenced drawings shown alongside the answer
 
 ```
 DrawMind/
-    drawings/           # engineering drawing image files
-    chroma_db/          # persistent vector database
     core/
         __init__.py
-        ingest.py       # vision extraction and ChromaDB storage
-        search.py       # Q&A, routing, and retrieval logic
-    app.py              # Streamlit UI
+        ingest.py       # Vision AI extraction and Pinecone storage
+        search.py       # Question routing and retrieval logic
+    api.py              # FastAPI REST endpoints
+    app.py              # Streamlit frontend
     requirements.txt
+    render.yaml
     .env                # API keys (not committed)
 ```
+
+---
+
+## API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | /health | Check if API is running |
+| GET | /stats | Total drawings and component breakdown |
+| POST | /ingest | Upload and ingest a new drawing |
+| POST | /ask | Ask a natural language question |
 
 ---
 
@@ -103,79 +142,83 @@ pip install -r requirements.txt
 
 ### 4. Set up environment variables
 
-Create a `.env` file in the root directory:
+Create a `.env` file:
 
 ```
-GROQ_API_KEY=your_groq_api_key_here
+GROQ_API_KEY=your_groq_api_key
+PINECONE_API_KEY=your_pinecone_api_key
+PINECONE_INDEX=drawmind
+CLOUDINARY_CLOUD_NAME=your_cloud_name
+CLOUDINARY_API_KEY=your_cloudinary_api_key
+CLOUDINARY_API_SECRET=your_cloudinary_api_secret
+API_URL=http://localhost:8000
 ```
 
-Get your free Groq API key at: https://console.groq.com
+### 5. Ingest drawings
 
-### 5. Add engineering drawings
-
-Place your engineering drawing images (PNG, JPG, WEBP) inside the `drawings/` folder.
-
-### 6. Ingest drawings
+Place engineering drawing images in the `drawings/` folder then run:
 
 ```bash
 python core/ingest.py
 ```
 
-This processes every drawing through Groq Vision and stores extracted metadata in ChromaDB.
+### 6. Run locally
 
-### 7. Run the app
+Open two terminals:
 
+**Terminal 1 (FastAPI):**
+```bash
+uvicorn api:app --reload --port 8000
+```
+
+**Terminal 2 (Streamlit):**
 ```bash
 streamlit run app.py
 ```
 
 ---
 
-## Usage
+## Example Questions
 
-### Asking Questions
-
-Type any natural language question in the input box:
-
-| Question Type | Example |
+| Type | Question |
 |---|---|
-| Component search | "Show me all gear drawings" |
-| Material search | "Which drawing has stainless steel material" |
-| Database overview | "What components are available in the database" |
-| Missing data audit | "Which drawings are missing material specification" |
-| Drawing specific | "What are the tolerances in drawing 9.jpg" |
+| Overview | "What components are available in the database?" |
+| Component | "Show me all gear drawings" |
+| Material | "Which drawing has alloy steel material?" |
+| Dimension | "Find shafts longer than 500mm" |
+| Analytical | "Which drawing has the largest dimensions?" |
+| Audit | "Which drawings are missing material specification?" |
+| Filename | "Give me image of 8.jpg" |
 | Edge case | "Give me 20 bolt drawings" |
-
-### Uploading New Drawings
-
-Use the **Add New Drawings** section in the sidebar to upload new drawing images. They are automatically ingested and become searchable immediately without restarting the app.
 
 ---
 
 ## Architecture Decisions
 
 **Why Vision AI instead of PDF text extraction?**
-Engineering drawings are image based. Dimensions, symbols, and text are drawn as part of the image rather than embedded as digital text. Standard PDF text extraction returns nothing useful. Vision AI reads the drawing visually, exactly as a human engineer would.
+Engineering drawings are image based. Dimensions, symbols, and text are drawn as part of the image rather than embedded as digital text. Vision AI reads the drawing visually exactly as a human engineer would.
+
+**Why Pinecone instead of local ChromaDB?**
+ChromaDB stores data locally and loses everything when the container resets. Pinecone is a managed cloud vector database. Data persists permanently regardless of server restarts or redeployments.
 
 **Why direct metadata filtering over semantic search for component questions?**
-When a user asks "show me gear drawings", semantic search retrieves the top N most similar vectors which may include irrelevant components if gears dominate the database. Direct metadata filtering queries ChromaDB for exact component type matches, giving precise and reliable results.
+Semantic search retrieves the top N most similar vectors which may miss some components or include irrelevant ones when one component type dominates the database. Direct metadata filtering returns every matching drawing with 100 percent accuracy.
 
-**Why compact context for global questions?**
-Passing full JSON for 30 plus drawings exceeds LLM token limits. For overview questions, only key fields (filename, component type, material, drawing number, scale, units) are passed as compact summaries, reducing token usage by approximately 80 percent while retaining all information needed to answer the question.
-
-**Why LLM based component extraction from questions?**
-Hardcoded keyword matching breaks when users ask about component types not in the predefined list. Using a small LLM call to extract the component type from the question handles synonyms, plurals, and novel component types automatically without any code changes.
+**Why LLM controlled image display?**
+Instead of always showing referenced drawings or never showing them, the LLM decides based on the question type. Analytical questions get text only answers. Show or display questions get images. This makes the UI feel intelligent rather than mechanical.
 
 ---
 
-## Roadmap
+## Production Roadmap
 
-- Structured numerical filtering (find gears with diameter greater than 100mm)
-- Similarity search by image (upload an unknown drawing and find similar ones)
-- Automated ingestion pipeline using Airflow for continuous data freshness
-- Migration to Pinecone for enterprise scale vector storage
-- Export search results as CSV for procurement workflows
-- Multi language support for international engineering drawings
+| Component | Current | Production Path |
+|---|---|---|
+| Vector Database | Pinecone Starter | Pinecone Standard with namespaces |
+| Image Storage | Cloudinary Free | Cloudinary or AWS S3 |
+| Ingestion | Manual upload via UI | Airflow automated pipeline |
+| Observability | Railway logs | OpenTelemetry, Grafana, Prometheus |
+| Quality Control | Manual testing | Automated LLM-as-judge, RAGAS evaluation |
+| Frontend | Streamlit | React or Next.js |
 
 ---
 
