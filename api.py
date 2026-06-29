@@ -129,7 +129,7 @@ async def ask(request: QuestionRequest):
             raw = json.loads(meta.get("raw_json", "{}"))
             clean_metadatas.append({
                 "filename": meta.get("filename"),
-                "image_path": meta.get("image_path"),
+                "image_url": meta.get("image_url"),
                 "component_type": meta.get("component_type", "unknown"),
                 "material": meta.get("material", "unknown"),
                 "drawing_number": meta.get("drawing_number", "unknown"),
